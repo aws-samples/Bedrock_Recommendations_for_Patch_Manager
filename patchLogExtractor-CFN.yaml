@@ -1,0 +1,1209 @@
+#*
+#* Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+#* SPDX-License-Identifier: MIT-0
+#*
+#* Permission is hereby granted, free of charge, to any person obtaining a copy of this
+#* software and associated documentation files (the "Software"), to deal in the Software
+#* without restriction, including without limitation the rights to use, copy, modify,
+#* merge, publish, distribute, sublicense, and/or sell copies of the Software, and to
+#* permit persons to whom the Software is furnished to do so.
+#*
+#* THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED,
+#* INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+#* PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT
+#* HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+#* OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+#* SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+#*
+
+#------------------------------------------------------------------------------
+#
+# Template: patch-log-extractor.yaml
+# Purpose:  AWS CloudFormation template to create a summary for failed patch operations for multi-account and multi-Region using Amazon Bedrock, EventBridge, AWS Lambda, and AWS Systems Manager Run Command.
+#
+#------------------------------------------------------------------------------
+
+AWSTemplateFormatVersion: "2010-09-09"
+Description:
+  AWS CloudFormation template to create a summary for failed patch operations for multi-account and multi-Region using Amazon Bedrock, EventBridge,
+  AWS Lambda, and AWS Systems Manager Run Command.
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: "Central Account"
+        Parameters:
+          - CentralAccount
+          - OrganizationID
+          - EventBridgeRuleSchedule
+          - EmailService
+          - RecipientEmail
+          - SenderEmail
+          - S3BucketName
+          # - Chatbot
+      - Label:
+          default: "Member Account(s)"
+        Parameters:
+          - MemberAccount
+          - CentralS3Bucket
+    ParameterLabels:
+      MemberAccount:
+        default: "Member AWS Account"
+      OrganizationID:
+        default: "Organization ID"
+      CentralAccount:
+        default: "Central AWS Account"
+      CentralS3Bucket:
+        default: "Central S3 Bucket"
+Parameters:
+  S3BucketName:
+    Type: String
+    Description: (Optional) Name for the S3 bucket. If no name is provided, the S3 bucket is named similarly to patch-reporting-$AccountId-$Region.
+  MemberAccount:
+    Type: String
+    Description: Create the necessary resources in the Member account(s). Use to collect patch troubleshooting logs from managed nodes.
+    Default: false
+    AllowedValues:
+      - true
+      - false
+  CentralAccount:
+    Type: String
+    Description: Create the necessary resources in the Central account. Use to generate the report for the multiple accounts at once.
+    Default: true
+    AllowedValues:
+      - true
+      - false
+  OrganizationID:
+    Type: String
+    Description: (Required) AWS Organizations ID. This is used to allow member account managed nodes to upload logs to the S3 bucket.
+  EventBridgeRuleSchedule:
+    Type: String
+    Description: >-
+      (Required) The cron or rate expression to use for the EventBridge rule. For example: cron(0 12 * * ? *) or rate(7 days). Important: The time zone used is UTC. For more information, see https://docs.aws.amazon.com/eventbridge/latest/userguide/scheduled-events.html.
+    Default: cron(0 12 * * ? *)
+    AllowedPattern: "^(?:rate[(](?:(?:1[ ]+(hour|minute|day))|(?:[0-9]+[ ]+(hours|minutes|days)))[)])|(?:cron[(](?:(?:(?:[0-5]?[0-9])|[*])(?:(?:[-](?:(?:[0-5]?[0-9])|[*]))|(?:[/][0-9]+))?(?:[,](?:(?:[0-5]?[0-9])|[*])(?:(?:[-](?:(?:[0-5]?[0-9])|[*]))|(?:[/][0-9]+))?)*)[ ]+(?:(?:(?:[0-2]?[0-9])|[*])(?:(?:[-](?:(?:[0-2]?[0-9])|[*]))|(?:[/][0-9]+))?(?:[,](?:(?:[0-2]?[0-9])|[*])(?:(?:[-](?:(?:[0-2]?[0-9])|[*]))|(?:[/][0-9]+))?)*)[ ]+(?:(?:[?][ ]+(?:(?:(?:[1]?[0-9])|(?:JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)|[*])(?:(?:[-](?:(?:[1]?[0-9])|(?:JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)|[*])(?:[/][0-9]+)?)|(?:[/][0-9]+))?(?:[,](?:(?:[1]?[0-9])|(?:JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)|[*])(?:(?:[-](?:(?:[1]?[0-9])|(?:JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)|[*])(?:[/][0-9]+)?)|(?:[/][0-9]+))?)*)[ ]+(?:(?:(?:[1-7]|(?:SUN|MON|TUE|WED|THU|FRI|SAT))[#][0-5])|(?:(?:(?:(?:[1-7]|(?:SUN|MON|TUE|WED|THU|FRI|SAT))L?)|[L*])(?:(?:[-](?:(?:(?:[1-7]|(?:SUN|MON|TUE|WED|THU|FRI|SAT))L?)|[L*]))|(?:[/][0-9]+))?(?:[,](?:(?:(?:[1-7]|(?:SUN|MON|TUE|WED|THU|FRI|SAT))L?)|[L*])(?:(?:[-](?:(?:(?:[1-7]|(?:SUN|MON|TUE|WED|THU|FRI|SAT))L?)|[L*]))|(?:[/][0-9]+))?)*)))|(?:(?:(?:(?:(?:[1-3]?[0-9])W?)|LW|[L*])(?:(?:[-](?:(?:(?:[1-3]?[0-9])W?)|LW|[L*]))|(?:[/][0-9]+))?(?:[,](?:(?:(?:[1-3]?[0-9])W?)|LW|[L*])(?:(?:[-](?:(?:(?:[1-3]?[0-9])W?)|LW|[L*]))|(?:[/][0-9]+))?)*)[ ]+(?:(?:(?:[1]?[0-9])|(?:JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)|[*])(?:(?:[-](?:(?:[1]?[0-9])|(?:JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)|[*])(?:[/][0-9]+)?)|(?:[/][0-9]+))?(?:[,](?:(?:[1]?[0-9])|(?:JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)|[*])(?:(?:[-](?:(?:[1]?[0-9])|(?:JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)|[*])(?:[/][0-9]+)?)|(?:[/][0-9]+))?)*)[ ]+[?]))[ ]+(?:(?:(?:[12][0-9]{3})|[*])(?:(?:[-](?:(?:[12][0-9]{3})|[*]))|(?:[/][0-9]+))?(?:[,](?:(?:[12][0-9]{3})|[*])(?:(?:[-](?:(?:[12][0-9]{3})|[*]))|(?:[/][0-9]+))?)*)[)])$"
+    ConstraintDescription: "Rate or cron format in https://docs.aws.amazon.com/eventbridge/latest/userguide/scheduled-events.html."
+  EmailService:
+    Type: String
+    Description: (Required) AWS service to be used for the patch summary email.
+    Default: SES
+    AllowedValues:
+      - SES
+  RecipientEmail:
+    Type: String
+    Description: (Required) Email address to receive the patch summary report generated by Amazon Bedrock.
+  SenderEmail:
+    Type: String
+    Description: (Required) Email address to send the patch summary report generated by Amazon Bedrock.
+  CentralS3Bucket:
+    Type: String
+    Description: Required when MemberAccount parameter is set to true. The name of the S3 bucket generated after running this CloudFormation in the central account.
+  # Chatbot:
+  #   Type: String
+  #   Description: Creating the necessary resources to use AWS Chatbot on the central account.
+  #   Default: false
+  #   AllowedValues:
+  #     - true
+  #     - false
+Rules:
+  SenderEmailParameters:
+    RuleCondition: !And
+      - !Equals [!Ref CentralAccount, "true"]
+      - !Equals [!Ref EmailService, "SES"]
+      - !Equals [!Ref MemberAccount, "false"]
+    Assertions:
+      - Assert: !Not
+          - !Equals [!Ref SenderEmail, ""]
+        AssertDescription: "SenderEmail parameter cant be empty when EmailService is set to SES."
+  RecipientEmailParameters:
+    RuleCondition: !And
+      - !Equals [!Ref CentralAccount, "true"]
+      - !Or [
+          !Equals [!Ref EmailService, "SES"],
+          !Equals [!Ref EmailService, "SNS"],
+        ]
+      - !Equals [!Ref MemberAccount, "false"]
+    Assertions:
+      - Assert: !Not
+          - !Equals [!Ref RecipientEmail, ""]
+        AssertDescription: "RecipientEmail parameter cant be empty."
+  MemberAccountParameters:
+    RuleCondition: !Equals
+      - !Ref MemberAccount
+      - "true"
+    Assertions:
+      - Assert: !Not
+          - !Equals
+            - !Ref CentralS3Bucket
+            - ""
+        AssertDescription: "CentralS3Bucket parameter cant be empty"
+Conditions:
+  S3BucketNameEmpty: !Equals [!Ref S3BucketName, ""]
+  CentralAccount: !And
+    - !Equals [!Ref "MemberAccount", false]
+    - !Equals [!Ref "CentralAccount", true]
+  MemberAccount: !And
+    - !Equals [!Ref "MemberAccount", true]
+    - !Equals [!Ref "CentralAccount", false]
+  SNSEmailResource: !And
+    - !Equals [!Ref "CentralAccount", true]
+    - !Equals [!Ref "EmailService", "SNS"]
+  # ChatbotResource: !And
+  #   - !Equals [!Ref "CentralAccount", true]
+  #   - !Equals [!Ref "Chatbot", true]
+  # SNSResources: !Or
+  #   - !And
+  #     - !Equals [!Ref "CentralAccount", true]
+  #     - !Equals [!Ref "Chatbot", true]
+  #   - !And
+  #     - !Equals [!Ref "CentralAccount", true]
+  #     - !Equals [!Ref "EmailService", "SNS"]
+Resources:
+  #############################
+  # Central account resources #
+  #############################
+  PermissionForEventsToInvokeLambda:
+    Condition: CentralAccount
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName:
+        Ref: ReportGeneratorLambdaFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt ReportGeneratorScheduler.Arn
+  ReportGeneratorLambdaFunctionRole:
+    Condition: CentralAccount
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Path: "/"
+      Policies:
+        - PolicyName: DynamoDBPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              # - Effect: Allow
+              #   Action:
+              #     - dynamodb:GetItem
+              #     - dynamodb:PutItem
+              #     - dynamodb:UpdateItem
+              #     - dynamodb:DeleteItem
+              #     - dynamodb:Scan
+              #   Resource:
+              #     - !GetAtt PatchInvocationDynamoDBTable.Arn
+              #     - !GetAtt PatchOperationDynamoDBTable.Arn
+              - Action:
+                  - bedrock:InvokeModel
+                Resource:
+                  - !Sub arn:${AWS::Partition}:bedrock:${AWS::Region}::foundation-model/anthropic.claude-3-sonnet-20240229-v1:0
+                Effect: Allow
+              - Action:
+                  - logs:CreateLogGroup
+                Resource:
+                  - !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:*
+                Effect: Allow
+              - Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/*:*
+                Effect: Allow
+              - Action:
+                  - s3:PutObject
+                  - s3:GetObject
+                  - s3:ListBucket
+                  - s3:PutObjectAcl
+                  - s3:DeleteObject
+                Resource:
+                  - !Sub arn:${AWS::Partition}:s3:::${PatchReportingS3Bucket}/*
+                Effect: Allow
+              - Action:
+                  - s3:ListBucket
+                Resource:
+                  - !GetAtt PatchReportingS3Bucket.Arn
+                Effect: Allow
+              # - !If
+              #   - SNSResources
+              #   - Action: sns:Publish
+              #     Resource:
+              #       - !If [
+              #           SNSEmailResource,
+              #           !Ref PatchReportSNSTopic,
+              #           !Ref "AWS::NoValue",
+              #         ]
+              #       # - !If [
+              #       #     ChatbotResource,
+              #       #     !Ref ChatbotSNSTopic,
+              #       #     !Ref "AWS::NoValue",
+              #       #   ]
+              #     Effect: Allow
+              #   - !Ref "AWS::NoValue"
+              - !If
+                - SNSEmailResource
+                - !Ref "AWS::NoValue"
+                - Action:
+                    - ses:SendEmail
+                    - ses:SendRawEmail
+                  Resource: "*"
+                  Effect: Allow
+                  Condition:
+                    StringEquals:
+                      "ses:FromAddress": !Ref SenderEmail
+      Tags:
+        - Key: cloudformation:logical-id
+          Value: ReportGeneratorLambdaFunctionRole
+        - Key: cloudformation:stack-id
+          Value: !Ref AWS::StackId
+        - Key: cloudformation:stack-name
+          Value: !Ref AWS::StackName
+  ReportGeneratorLambdaFunction:
+    Condition: CentralAccount
+    Type: AWS::Lambda::Function
+    Properties:
+      Description: !Sub "Lambda function created to run multi-account and multi-Region Automation using AWS Systems Manager Automation. CloudFormation StackId: ${AWS::StackId}"
+      Code:
+        ZipFile: |-
+          # Standard library imports
+          import logging
+          from datetime import datetime, timezone
+          import time
+          import os
+          import json
+          from webbrowser import get
+          import boto3
+
+          # AWS boto3 imports
+          from botocore.exceptions import ClientError, ReadTimeoutError
+          from botocore.config import Config
+          from email.mime.text import MIMEText
+          from email.mime.multipart import MIMEMultipart
+
+          # Configure logging
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+
+          # Create clients for S3, SES, CW and Bedrock
+          s3 = boto3.client('s3')
+          ses = boto3.client('ses')
+          cloudwatch_logs = boto3.client('logs')
+
+          # Configure a timeout for bedrock
+          bedrock_config = Config(
+              read_timeout=300,
+              retries={'max_attempts': 3}
+          )
+
+          bedrock = boto3.client('bedrock-runtime', config=bedrock_config)
+
+          # Main lambda function handler
+          def lambda_handler(event, context):
+              bucket_name = os.environ.get('S3_BUCKET_NAME')
+              sender_email = os.environ.get('SENDER_EMAIL')
+              recipient_email = os.environ.get('RECIPIENT_EMAIL')
+              region_id = os.environ.get('REGION_ID')
+              s3_account_id = os.environ.get('S3_ACCOUNT_ID')
+              function_name = os.environ.get('LAMBDA_FUNCTION_NAME')
+
+              recommendations_data = []
+
+              if not bucket_name:
+                  logger.error("S3_BUCKET_NAME environment variable is not set.")
+                  return {
+                      'statusCode': 500,
+                      'body': json.dumps('S3_BUCKET_NAME environment variable is not set.')
+                  }
+              
+              try:
+                  # Get all object keys from S3
+                  object_keys = get_object_keys_from_s3(bucket_name)
+                  
+                  # Group keys by account ID, region, and command ID
+                  grouped_keys = group_keys_by_command_id(object_keys)
+
+                  # Process each group of keys
+                  for account_id, regions in grouped_keys.items():
+                      for region, command_ids in regions.items():
+                          for command_id, keys in command_ids.items():
+                              # Combine contents of all files for this command ID
+                              combined_contents = get_combined_contents(bucket_name, keys)
+                              
+                              # Generate recommendations using Bedrock
+                              recommendations = invoke_bedrock_model(combined_contents)
+
+                              # Save recommendations if generated successfully
+                              if recommendations:
+                                  # Save recommendations to S3
+                                  s3_key = save_recommendations(bucket_name, account_id, region, command_id, recommendations)
+
+                                  # Send SES email
+                                  # Accumulate data for email
+                                  recommendations_data.append({
+                                      'account_id': account_id,
+                                      'region': region,
+                                      'command_id': command_id,
+                                      's3_key': s3_key
+                                  })
+                      
+                                  # Archive processed files
+                                  archive_processed_files(bucket_name, keys)
+
+                  if recommendations_data:
+
+                      # Get lambda last execution time
+                      current_exec_time, sec_last_exec_time = get_last_execution_times(function_name)
+
+                      # Send SES Email
+                      send_ses_email(bucket_name, recommendations_data, sender_email, recipient_email, region_id, s3_account_id, current_exec_time, sec_last_exec_time)
+
+                  return {
+                      'statusCode': 200,
+                      'body': json.dumps('Patch log processing completed successfully.')
+                  }
+              
+              except Exception as e:
+                  logger.error(f"Error processing patch logs: {str(e)}", exc_info=True)
+                  return {
+                      'statusCode': 500,
+                      'body': json.dumps(f'Error processing patch logs: {str(e)}')
+                  }
+
+          # Function to retrieves a list of object keys from the specified S3 bucket with pagination
+          def get_object_keys_from_s3(bucket_name, prefix='patchLogExtractor'):
+
+              object_keys = []
+              paginator = s3.get_paginator('list_objects_v2')
+              page_iterator = paginator.paginate(Bucket=bucket_name, Prefix=prefix)
+
+              for page in page_iterator:
+                  object_keys.extend(obj['Key'] for obj in page.get('Contents', []))
+
+              return object_keys
+
+          # Groups object keys by their account ID, region, and command ID
+          def group_keys_by_command_id(object_keys):
+
+              grouped_keys = {}
+
+              for key in object_keys:
+                  parts = key.split('/')
+                  if len(parts) >= 5:
+                      account_id, region, command_id = parts[1:4]
+                      grouped_keys.setdefault(account_id, {}).setdefault(region, {}).setdefault(command_id, []).append(key)
+
+              return grouped_keys
+
+          # Retrieves the combined contents of the files specified by the object keys from the S3 bucket.
+          def get_combined_contents(bucket_name, object_keys):
+
+              contents = []
+
+              for key in object_keys:
+                  file_name = os.path.basename(key)
+                  contents.append(f'### {file_name} ###')
+                  file_obj = s3.get_object(Bucket=bucket_name, Key=key)
+                  file_contents = file_obj['Body'].read().decode('utf-8')
+                  contents.append(file_contents)
+
+              return '\n'.join(contents)
+
+          # Invokes the specified Amazon Bedrock model with the given prompt and returns the response text.
+          def invoke_bedrock_model(combined_contents, max_retries=3, initial_backoff=1):
+
+              model_id = 'anthropic.claude-3-sonnet-20240229-v1:0'
+
+              prompt = f"""You are an expert AWS Systems Manager Patch Manager analyst. Analyze the following patching error logs from AWS-RunPatchBaseline document executions across multiple instances:
+
+          Patching Error Logs:
+          {combined_contents}
+
+          Please analyze the above logs and provide:
+          1. Detailed troubleshooting recommendations for patching errors in the above file. 
+          2. If there are any repeated error messages, group the error messages and show them as a single recommendation.
+          3. Detailed steps to resolve each issue, including the following where ever applicable:
+          - Relevant AWS Console actions or CLI commands
+          - PowerShell commands for Windows instances
+          - Shell commands for Linux instances
+          - Specific actions in the Operating System
+          4. Refer to the AWS Systems Manager Patch Manager troubleshooting documentation at https://docs.aws.amazon.com/systems-manager/latest/userguide/patch-manager-troubleshooting.html for additional guidance.
+
+          Use this format:
+          Summary of patching issues:
+          [Concise summary]
+
+          Note:- Add the following message "Please keep in mind that below generated recommendations should be thoroughly tested and validated in a development environment prior to any usage in a production environment."
+          Error Analysis and Recommendations:
+          1. "[Exact Error Message]":
+          - Affected Instances: [Total count] instances ([List of instance IDs])
+          - Root Cause: [Brief explanation]
+          - Resolution Steps:
+              a. [Specific step with command/action]
+              b. [Next step...]
+
+          2. "[Next Exact Error Message]":
+          ...
+
+          At the end, add a message to refer to https://docs.aws.amazon.com/systems-manager/latest/userguide/patch-manager-troubleshooting.html for further insights and contact AWS Support if needed.
+
+          Ensure your recommendations are clear, comprehensive, and directly actionable for AWS operations engineers. Group identical errors together, even if they occur on different instances. Provide as much detail as possible in the troubleshooting steps, including specific commands and console actions"""
+
+              native_request = {
+                  "anthropic_version": "bedrock-2023-05-31",
+                  "max_tokens": 4000,
+                  "temperature": 0.2,
+                  "messages": [
+                      {
+                          "role": "user",
+                          "content": [{"type": "text", "text": prompt}],
+                      }
+                  ],
+              }
+
+              request = json.dumps(native_request)
+
+              try:
+                  # Invoke the model with the request.
+                  response = bedrock.invoke_model(modelId=model_id, body=request)
+
+              except (ClientError, Exception) as e:
+                  print(f"ERROR: Can't invoke '{model_id}'. Reason: {e}")
+                  return None
+
+              for attempt in range(max_retries):
+                  try:
+                      model_response = json.loads(response["body"].read())
+                      logger.info(f"Input Tokens: {model_response['usage']['input_tokens']}")
+                      logger.info(f"Output Tokens: {model_response['usage']['output_tokens']}")
+                      return model_response["content"][0]["text"]
+                  except ReadTimeoutError as e:
+                      if attempt == max_retries - 1:
+                          logger.error(f"Max retries reached. Error invoking Bedrock model: {str(e)}")
+                          raise
+                      else:
+                          backoff_time = initial_backoff * (2 ** attempt)
+                          logger.warning(f"Timeout occurred. Retrying in {backoff_time} seconds...")
+                          time.sleep(backoff_time)
+                  except Exception as e:
+                      logger.error(f"Error invoking Bedrock model: {str(e)}")
+                      raise
+
+          # Saves the recommendations to the specified S3 bucket
+          def save_recommendations(bucket_name, account_id, region, command_id, recommendations):
+
+              # Get the current date in YYYY-MM-DD format
+              current_date = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+
+              # Create the key with the date included in the filename
+              key = f'recommendations/{account_id}/{region}/{command_id}/recommendations-{current_date}.txt'
+
+              try:
+                  s3.put_object(Bucket=bucket_name, Key=key, Body=recommendations)
+                  logger.info(f"Recommendations saved to s3://{bucket_name}/{key}")
+                  return key
+              except Exception as e:
+                  logger.error(f"Error saving recommendations: {str(e)}")
+                  raise
+
+          def get_last_execution_times(function_name):
+              try:
+                  log_group_name = f"/aws/lambda/{function_name}"
+                  response = cloudwatch_logs.describe_log_streams(
+                      logGroupName=log_group_name,
+                      orderBy='LastEventTime',
+                      descending=True,
+                      limit=2
+                  )
+                  
+                  execution_times = []
+                  
+                  for stream in response.get('logStreams', [])[:2]:
+                      last_event_timestamp = stream['lastEventTimestamp']
+                      execution_time = datetime.fromtimestamp(last_event_timestamp / 1000, tz=timezone.utc)
+                      execution_times.append(execution_time.strftime("%Y-%m-%d %H:%M:%S"))
+                  
+                  if len(execution_times) == 2:
+                      return execution_times[0], execution_times[1]  # Current, Second-to-last
+                  elif len(execution_times) == 1:
+                      return execution_times[0], None  # Only current execution time available
+                  else:
+                      return None, None  # No execution times available
+              
+              except Exception as e:
+                  logger.error(f"Error getting last execution times: {str(e)}")
+                  return None, None
+
+          # Send SES email
+          def send_ses_email(bucket_name, recommendations_data, sender_email, recipient_email, region_id, s3_account_id, current_exec_time, sec_last_exec_time):
+              if sec_last_exec_time:
+                  time_range = f"Below recommendations are for the patch operations data between <b>{sec_last_exec_time} UTC</b> and <b>{current_exec_time} UTC</b>"
+              else:
+                  time_range = f"Below recommendations are for the patch operations data till <b>{current_exec_time} UTC</b>"
+                  
+              try:
+                  # Create email content
+                  subject = "Patch recommendations report for troubleshooting"
+                  body_html = f"""
+                  <html>
+                  <head></head>
+                  <body>
+                      <h2>Consolidated patch recommendations for failed nodes</h2>
+                      <p>{time_range}</p>
+                      <p>The recommendations file(s) are hosted centrally in:</p>
+                      <p>S3 Bucket: <b>{bucket_name}</b></p>
+                      <p>Account ID: <b>{s3_account_id}</b></p>
+                      <p>Region: <b>{region_id}</b></p>
+                      <p>Below are Command IDs related to patching that have failed, timed out, or were cancelled. In the Recommendations File, you can find recommendations and troubleshooting insights generated by Amazon Bedrock related to the errors returned by managed nodes in each command operation.</b></p>
+                      <table border="1" cellpadding="5">
+                          <tr>
+                              <th>Account ID</th>
+                              <th>Region</th>
+                              <th>Command ID</th>
+                              <th>Recommendations File</th>
+                          </tr>
+                  """
+
+                  for data in recommendations_data:
+
+                      # Extract only the IDs by splitting on '=' and taking the second part
+                      account_id = data['account_id'].split('=')[1] if '=' in data['account_id'] else data['account_id']
+                      region = data['region'].split('=')[1] if '=' in data['region'] else data['region']
+                      command_id = data['command_id'].split('=')[1] if '=' in data['command_id'] else data['command_id']
+
+                      s3_url = f"https://s3.console.aws.amazon.com/s3/object/{bucket_name}/{data['s3_key']}?region={region_id}"
+                      
+                      body_html += f"""
+                          <tr>
+                              <td>{account_id}</td>
+                              <td>{region}</td>
+                              <td>{command_id}</td>
+                              <td><a href="{s3_url}">View Recommendations</a></td>
+                          </tr>
+                      """
+
+                  body_html += """
+                      </table>
+                  </body>
+                  </html>
+                  """
+
+                  # Create a multipart message
+                  msg = MIMEMultipart()
+                  msg['Subject'] = subject
+                  msg['From'] = sender_email
+                  msg['To'] = recipient_email
+
+                  # Attach the HTML content
+                  part = MIMEText(body_html, 'html')
+                  msg.attach(part)
+
+                  # Send the email
+                  ses = boto3.client('ses')
+                  response = ses.send_raw_email(
+                      Source=sender_email,
+                      Destinations=[recipient_email],
+                      RawMessage={'Data': msg.as_string()}
+                  )
+                  logger.info(f"Consolidated email sent successfully. Message ID: {response['MessageId']}")
+
+              except ClientError as e:
+                  logger.error(f"Error sending consolidated email: {e.response['Error']['Message']}")
+                  raise
+              except Exception as e:
+                  logger.error(f"Error sending consolidated email: {str(e)}")
+                  raise
+
+
+          # Archive processed files by copying them to the 'archive' folder and deleting the original files
+          def archive_processed_files(bucket_name, keys):
+              for key in keys:
+                  archive_key = f"archive/{key}"
+                  try:
+                      # Copy the object to the archive location
+                      s3.copy_object(Bucket=bucket_name, CopySource={'Bucket': bucket_name, 'Key': key}, Key=archive_key)
+                      
+                      # Delete the original object
+                      s3.delete_object(Bucket=bucket_name, Key=key)
+
+                  except Exception as e:
+                      logger.error(f"Error archiving object {key}: {str(e)}")
+      Environment:
+        Variables:
+          S3_BUCKET_NAME: !Ref PatchReportingS3Bucket
+          REGION_ID: !Ref "AWS::Region"
+          S3_ACCOUNT_ID: !Ref "AWS::AccountId"
+          # SNS_TOPIC_ARN: !Ref PatchReportSNSTopic
+          RECIPIENT_EMAIL: !Ref RecipientEmail
+          SENDER_EMAIL: !Ref SenderEmail
+          # CHATBOT_SNS_TOPIC_ARN:
+          #   !If [ChatbotResource, !Ref ChatbotSNSTopic, ""]
+      Handler: index.lambda_handler
+      Role: !GetAtt ReportGeneratorLambdaFunctionRole.Arn
+      Runtime: python3.12
+      Timeout: 900
+  ReportGeneratorScheduler:
+    Condition: CentralAccount
+    Type: AWS::Events::Rule
+    Properties:
+      Description: !Sub "EventBridge rule created to run on schedule. CloudFormation StackId: ${AWS::StackId}"
+      ScheduleExpression:
+        Ref: EventBridgeRuleSchedule
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt ReportGeneratorLambdaFunction.Arn
+          Id: ReportGenerator
+  PatchReportingS3Bucket:
+    Condition: CentralAccount
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !If [S3BucketNameEmpty, !Sub "patch-reporting-${AWS::AccountId}-${AWS::Region}", !Ref S3BucketName]
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+  BucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Condition: CentralAccount
+    Properties:
+      Bucket: !Ref PatchReportingS3Bucket
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Action:
+              - "s3:PutObject"
+              - "s3:GetObject"
+              - "s3:ListBucket"
+              - "s3:PutObjectAcl"
+            Effect: Allow
+            Resource:
+              - !Join [
+                  "/",
+                  [{ "Fn::GetAtt": [PatchReportingS3Bucket, Arn] }, "*"],
+                ]
+              - !GetAtt PatchReportingS3Bucket.Arn
+              # !Sub
+              #   - 'arn:${AWS::Partition}:s3:::${S3bucketwithPrefix}/EC2Report-*'
+              #   - S3bucketwithPrefix: !Ref S3Bucket
+              # - !Sub
+              #   - 'arn:${AWS::Partition}:s3:::${S3bucketwithPrefix}'
+              #   - S3bucketwithPrefix: !Ref S3Bucket
+            Principal: "*"
+            Condition:
+              StringLike:
+                "aws:PrincipalOrgID": [!Ref OrganizationID]
+  PatchLogExtractorCommandDocument:
+    Condition: MemberAccount
+    Type: AWS::SSM::Document
+    Properties:
+      Content:
+        schemaVersion: "2.2"
+        description: "Patch Log Extractor Command Document."
+        parameters:
+          AccountId:
+            type: String
+            description: Account ID for the account that the instance belongs to
+          Region:
+            type: String
+            description: Region for the instance
+          CommandId:
+            type: String
+            description: Command ID of the failed patch Command invocation
+          S3BucketName:
+            type: String
+            description: Name of the S3 Bucket to store the extracted patch logs
+            default:
+              !If [
+                CentralAccount,
+                !Ref PatchReportingS3Bucket,
+                !Ref CentralS3Bucket,
+              ]
+          InstanceId:
+            type: String
+          AttachmentURL:
+            type: String
+          Platform:
+            type: String
+          OperatingSystem:
+            type: String
+        mainSteps:
+          - action: aws:runPowerShellScript
+            name: runPowerShellScript
+            precondition:
+              StringEquals:
+                - platformType
+                - Windows
+            inputs:
+              timeoutSeconds: "3600"
+              runCommand:
+                - |
+                  $commandId = "{{ CommandId }}"
+                  $accountId = "{{ AccountId }}"
+                  $region = "{{ Region }}"
+                  $bucketName = "{{ S3BucketName }}"
+                  $instanceId = "{{ InstanceId }}"
+
+                  #Set log path
+                  $logPath = "$env:ProgramData\Amazon\SSM\InstanceData\$instanceId\document\orchestration\$commandId\awsrunPowerShellScript\PatchWindows"
+
+                  try {
+                    #Get stderr and stdout
+                    Write-S3Object -BucketName $bucketName -Key "patchLogExtractor/accountId=$accountId/region=$region/commandId=$commandId/$instanceId.txt" -File "$logPath\stderr"
+                    Write-output "Log file $logPath\stderr uploaded successfully to $bucketName"
+                  }
+                  catch {
+                    Write-Host "Error: $_"
+                  }
+          - action: aws:runShellScript
+            name: extractLinuxPatchLogs
+            precondition:
+              StringEquals:
+                - platformType
+                - Linux
+            inputs:
+              runCommand:
+                - |
+                  #!/bin/bash
+                  # Copyright 2023 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+                  # SPDX-License-Identifier: LicenseRef-.amazon.com.-AmznSL-1.0
+                  # Licensed under the Amazon Software License  http://aws.amazon.com/asl/
+
+                  set -euf -o pipefail
+                  OS="{{ OperatingSystem }}"
+                  PLATFORM="{{ Platform }}"
+                  RUNCOMMAND_ID="{{ CommandId }}"
+                  ACCOUNT_ID="{{ AccountId }}"
+                  REGION="{{ Region }}"
+                  BUCKET_NAME="{{ S3BucketName }}"
+                  INSTANCE_ID="{{ InstanceId }}"
+                  URL="{{ AttachmentURL }}"
+
+                  command_exists() {
+                      $(which "$1" > /dev/null 2>&1 )
+                      return $?
+                  }
+
+                  check_s3_access() {
+                      httpclient="$1"
+                      S3_ENDPOINT_URL="https://s3.$REGION.amazonaws.com"
+                      if [ $httpclient = "curl" ];then
+                          curl -s -f -o /dev/null $S3_ENDPOINT_URL
+                          if [ $? -eq 0 ]; then
+                              echo "Check2: [PASSED] Connectivity to the S3 endpoint is established."
+                          else
+                              echo "Check2: [FAILED] Connectivity to the S3 endpoint could not be established. This is required for Patch Manager to work and also for this automation to continue. Ensure the S3 connectivity is present on the Instance."
+                              exit 1
+                          fi
+                      else
+                          wget -q -O /dev/null $S3_ENDPOINT_URL
+                          if [ $? -eq 0 ]; then
+                              echo "Check2: [PASSED] Connectivity to the S3 endpoint is established."
+                          else
+                              echo "Check2: [FAILED] Connectivity to the S3 endpoint could not be established. This is required for Patch Manager to work and also for this automation to continue. Ensure the S3 connectivity is present on the Instance."
+                              exit 1
+                          fi
+                      fi
+                  }
+
+                  if command_exists curl; then
+                      echo "Check1: [PASSED] curl is present on the System."
+                      check_s3_access curl
+                  elif command_exists wget; then
+                      echo "Check1: [PASSED] wget is present on the System."
+                      check_s3_access wget
+                  else
+                      echo "Check1: [FAILED] Neither curl nor wget is installed."
+                      echo "Check2: [FAILED] Unable to check S3 Connectivity as neither curl or wget is installed on the instance."
+                      exit 1
+                  fi
+
+                  if command_exists unzip; then
+                      echo "Check3: [PASSED] unzip is present on the System."
+                  else
+                      echo "Check3: [FAILED] unzip is not present."
+                      exit 1
+                  fi
+
+                  # Check if python3 is available
+                  if command_exists python3; then
+                      python3_version=$(python3 --version 2>&1 | cut -d " " -f 2)
+                      major_version=$(echo "$python3_version" | cut -d. -f1)
+                      minor_version=$(echo "$python3_version" | cut -d. -f2)
+                      if [ "$major_version" -ge 3 ] && [ "$minor_version" -ge 7 ]; then
+                          echo "Check4: [PASSED] Python $python3_version is present on the System."
+                      else
+                          echo "Check4: [PASSED] Installed Python version is $python3_version. Minimum version required for the runbook to work is 3.7. We recommend upgrading to Python 3.8 or later to minimize impact of future update campaigns. Refer to this public documentation for more info on this : https://aws.amazon.com/blogs/developer/python-support-policy-updates-for-aws-sdks-and-tools/ "
+                      fi
+
+                  else
+                      echo "Check4: [FAILED] Python3 is not present on the System."
+                      exit 1
+                  fi
+
+                  TMP_DIRECTORY="/var/lib/amazon/ssm/PatchManagerLogAnalyzer"
+                  # Check if the PatchManagerLogAnalyzer exists
+                  if [ ! -d "$TMP_DIRECTORY" ]; then
+                      # Create the PatchManagerLogAnalyzer dir
+                      mkdir -p /var/lib/amazon/ssm/PatchManagerLogAnalyzer
+                  fi
+
+                  cd $TMP_DIRECTORY
+                  UnzippedDirectory="/var/lib/amazon/ssm/PatchManagerLogAnalyzer/Automation-$RUNCOMMAND_ID"
+
+                  # Check if curl or wget is available
+                  if command_exists curl; then
+                      curl -s "$URL" --output attachments.zip
+                  elif command_exists wget; then
+                      wget -q "$URL" -O attachments.zip
+                  else
+                      echo "Error: Neither curl nor wget is installed. Unable to download file." >&2
+                      exit 1
+                  fi
+
+                  unzip -qq -o -d $UnzippedDirectory attachments.zip
+                  [ $? -ne 0 ] && echo "Error unzipping the file" >&2 && exit 1
+
+                  cd $UnzippedDirectory
+                  echo "Starting 'python3 main.py $INSTANCE_ID $RUNCOMMAND_ID $OS $PLATFORM' "
+                  python3 main.py "$INSTANCE_ID" "$RUNCOMMAND_ID" "$OS" "$PLATFORM" >> output.log
+
+                  echo '#!/bin/bash
+
+                  # Check if the correct number of arguments is provided
+                  if [ "$#" -ne 2 ]; then
+                      echo "Usage: $0 input_file output_file"
+                      exit 1
+                  fi
+
+                  input_file="$1"
+                  output_file="$2"
+
+                  # Use awk to process the file
+                  awk '\''
+                  /=======================/ || /TROUBLESHOOTING RESULTS/ {
+                      # Skip lines containing "=======================" or "TROUBLESHOOTING RESULTS"
+                      next
+                  }
+                  BEGIN {
+                      # Initialize counter for occurrences of delimiter
+                      delimiter_count = 0
+                  }
+                  {
+                      # Print the line
+                      print
+
+                      # Check for the delimiter
+                      if ($0 ~ /^---------/) {
+                          delimiter_count++
+
+                          # If the delimiter count is greater than 3, stop processing further lines
+                          if (delimiter_count >= 3) {
+                              exit
+                          }
+                      }
+                  }
+
+                  '\'' "$input_file" > "$output_file"' > process_log.sh
+
+                  # Make the script executable
+                  chmod +x process_log.sh
+
+                  ./process_log.sh output.log processed.log
+
+                  aws s3 cp processed.log s3://$BUCKET_NAME/patchLogExtractor/accountId=$ACCOUNT_ID/region=$REGION/commandId=$RUNCOMMAND_ID/$INSTANCE_ID.txt
+
+                  # Clean up directory. Wait for 5 seconds in case of file locks.
+                  sleep 5
+                  rm -rf $TMP_DIRECTORY
+      DocumentFormat: YAML
+      DocumentType: Command
+
+  ############################
+  # Member account resources #
+  ############################
+  StateMachineRole:
+    Condition: MemberAccount
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - states.amazonaws.com
+            Action: sts:AssumeRole
+      Path: "/"
+      Policies:
+        - PolicyName: StepFunctionExec
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ssm:SendCommand
+                Resource:
+                  - !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:document/${PatchLogExtractorCommandDocument}
+                  - !Sub arn:${AWS::Partition}:ec2:*:*:instance/*
+              - Effect: Allow
+                Action:
+                  - ssm:DescribeInstanceInformation
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogDelivery
+                  - logs:CreateLogStream
+                  - logs:GetLogDelivery
+                  - logs:UpdateLogDelivery
+                  - logs:DeleteLogDelivery
+                  - logs:ListLogDeliveries
+                  - logs:PutLogEvents
+                  - logs:PutResourcePolicy
+                  - logs:DescribeResourcePolicies
+                  - logs:DescribeLogGroups
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - ssm:GetDocument
+                Resource:
+                  - !Sub arn:${AWS::Partition}:ssm:${AWS::Region}::document/AWSSupport-TroubleshootPatchManagerLinux
+      Tags:
+        - Key: cloudformation:logical-id
+          Value: StateMachineRole
+        - Key: cloudformation:stack-id
+          Value: !Ref AWS::StackId
+        - Key: cloudformation:stack-name
+          Value: !Ref AWS::StackName
+  PatchInvocationStateMachineLogGroup:
+    Condition: MemberAccount
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      RetentionInDays: 30
+  PatchInvocationStateMachine:
+    Condition: MemberAccount
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      StateMachineType: EXPRESS
+      RoleArn: !GetAtt StateMachineRole.Arn
+      LoggingConfiguration:
+        Destinations:
+          - CloudWatchLogsLogGroup:
+              LogGroupArn: !GetAtt PatchInvocationStateMachineLogGroup.Arn
+        IncludeExecutionData: True
+        Level: ALL
+      DefinitionString: !Sub |-
+        {
+          "Comment": "State Machine for PatchInvocation data",
+          "StartAt": "DescribeInstanceInformation",
+          "States": {
+            "DescribeInstanceInformation": {
+              "Type": "Task",
+              "Parameters": {
+                "Filters": [
+                  {
+                    "Key": "InstanceIds",
+                    "Values.$": "States.Array($.detail.['instance-id'])"
+                  }
+                ]
+              },
+              "Resource": "arn:${AWS::Partition}:states:::aws-sdk:ssm:describeInstanceInformation",
+              "Next": "GetDocument",
+              "ResultPath": "$.InstanceInformation"
+            },
+            "GetDocument": {
+              "Type": "Task",
+              "Parameters": {
+                "Name": "AWSSupport-TroubleshootPatchManagerLinux"
+              },
+              "Resource": "arn:${AWS::Partition}:states:::aws-sdk:ssm:getDocument",
+              "Next": "SendCommand",
+              "ResultPath": "$.GetDocument"
+            },
+            "SendCommand": {
+              "Type": "Task",
+              "Parameters": {
+                "DocumentName": "${PatchLogExtractorCommandDocument}",
+                "Targets": [
+                  {
+                    "Key": "InstanceIds",
+                    "Values.$": "States.Array($.detail.['instance-id'])"
+                  }
+                ],
+                "Parameters": {
+                  "AccountId.$": "States.Array($.account)",
+                  "Region.$": "States.Array($.region)",
+                  "CommandId.$": "States.Array($.detail.['command-id'])",
+                  "InstanceId.$": "States.Array($.detail.['instance-id'])",
+                  "AttachmentURL.$": "States.Array($.GetDocument.AttachmentsContent[0].Url)",
+                  "OperatingSystem.$": "States.Array($.InstanceInformation.InstanceInformationList[0].PlatformName)",
+                  "Platform.$": "States.Array($.InstanceInformation.InstanceInformationList[0].PlatformVersion)"
+                }
+              },
+              "Resource": "arn:${AWS::Partition}:states:::aws-sdk:ssm:sendCommand",
+              "End": true
+            }
+          }
+        }
+  PatchInvocationEventBridgeRuleRole:
+    Condition: MemberAccount
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - events.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - states:StartExecution
+                Resource:
+                  - !Ref PatchInvocationStateMachine
+          PolicyName: StartStateMachinePolicy
+        - PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - iam:PassRole
+                Resource: !GetAtt StateMachineRole.Arn
+          PolicyName: StateMachinePassRolePolicy
+      Tags:
+        - Key: CloudFormation StackId
+          Value: !Ref AWS::StackId
+  PatchInvocationEventBridgeRule:
+    Condition: MemberAccount
+    Type: AWS::Events::Rule
+    Properties:
+      Description: Amazon EventBridge rule for each run command invocation. This is created as a part of a CloudFormation.
+      EventPattern:
+        source:
+          - aws.ssm
+        detail-type:
+          - EC2 Command Invocation Status-change Notification
+        detail:
+          document-name:
+            - AWS-RunPatchBaseline
+            - AWS-RunPatchBaselineAssociation
+            - AWS-RunPatchBaselineWithHooks
+          status:
+            - Failed
+            - Cancelled
+            - TimedOut
+      Targets:
+        - Arn: !Ref PatchInvocationStateMachine
+          Id: PatchInvocationEventBridgeRule
+          RoleArn: !GetAtt PatchInvocationEventBridgeRuleRole.Arn
+  # PatchReportSNSTopic:
+  #   # Condition: SNSEmailResource
+  #   Type: AWS::SNS::Topic
+  #   Properties:
+  #     Subscription:
+  #       - Endpoint: !Ref RecipientEmail
+  #         Protocol: email
+  #     Tags:
+  #       - Key: CloudformationStackName
+  #         Value: !Sub ${AWS::StackName}
+  # EmailSNSPolicy:
+  #   # Condition: SNSEmailResource
+  #   Type: AWS::SNS::TopicPolicy
+  #   Properties:
+  #     PolicyDocument:
+  #       Id: !Sub PatchReportSNSPolicy-${AWS::StackName}
+  #       Version: "2012-10-17"
+  #       Statement:
+  #         - Sid: !Sub AllowLambda-${AWS::StackName}
+  #           Effect: Allow
+  #           Principal:
+  #             Service: lambda.amazonaws.com
+  #           Action: sns:Publish
+  #           Resource:
+  #             - !Ref PatchReportSNSTopic
+  #           Condition:
+  #             StringEquals:
+  #               "aws:SourceAccount": !Ref "AWS::AccountId"
+  #         - Sid: !Sub PatchReport-${AWS::StackName}
+  #           Effect: Allow
+  #           Principal:
+  #             AWS: "*"
+  #           Action:
+  #             - SNS:GetTopicAttributes
+  #             - SNS:SetTopicAttributes
+  #             - SNS:AddPermission
+  #             - SNS:RemovePermission
+  #             - SNS:DeleteTopic
+  #             - SNS:Subscribe
+  #             - SNS:ListSubscriptionsByTopic
+  #             - SNS:Publish
+  #           Resource:
+  #             - !Ref PatchReportSNSTopic
+  #           Condition:
+  #             StringEquals:
+  #               "AWS:SourceOwner": !Ref "AWS::AccountId"
+  #     Topics:
+  #       - !Ref PatchReportSNSTopic
+  # ChatbotSNSPolicy:
+  #   Condition: ChatbotResource
+  #   Type: AWS::SNS::TopicPolicy
+  #   Properties:
+  #     PolicyDocument:
+  #       Id: !Sub PatchReportSNSPolicy-${AWS::StackName}
+  #       Version: "2012-10-17"
+  #       Statement:
+  #         - Sid: !Sub AllowLambda-${AWS::StackName}
+  #           Effect: Allow
+  #           Principal:
+  #             Service: lambda.amazonaws.com
+  #           Action: sns:Publish
+  #           Resource:
+  #             - !Ref ChatbotSNSTopic
+  #           Condition:
+  #             StringEquals:
+  #               "aws:SourceAccount": !Ref "AWS::AccountId"
+  #         - Sid: !Sub PatchReport-${AWS::StackName}
+  #           Effect: Allow
+  #           Principal:
+  #             AWS: "*"
+  #           Action:
+  #             - SNS:GetTopicAttributes
+  #             - SNS:SetTopicAttributes
+  #             - SNS:AddPermission
+  #             - SNS:RemovePermission
+  #             - SNS:DeleteTopic
+  #             - SNS:Subscribe
+  #             - SNS:ListSubscriptionsByTopic
+  #             - SNS:Publish
+  #           Resource:
+  #             - !Ref ChatbotSNSTopic
+  #           Condition:
+  #             StringEquals:
+  #               "AWS:SourceOwner": !Ref "AWS::AccountId"
+  #     Topics:
+  #       - !Ref ChatbotSNSTopic
+  # ChatbotSNSTopic:
+  #   Condition: ChatbotResource
+  #   Type: AWS::SNS::Topic
+  #   Properties:
+  #     Tags:
+  #       - Key: CloudformationStackName
+  #         Value: !Sub ${AWS::StackName}
+Outputs:
+  PatchReportingS3Bucket:
+    Condition: CentralAccount
+    Description: The name of the S3 bucket in the central account.
+    Value: !Ref PatchReportingS3Bucket
+  # ChatbotSNSTopic:
+  #   Condition: ChatbotResource
+  #   Description: The topic name of the ChatbotSNSTopic in the central account.
+  #   Value: !GetAtt ChatbotSNSTopic.TopicName
