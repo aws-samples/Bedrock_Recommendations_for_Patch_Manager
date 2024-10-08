@@ -291,7 +291,6 @@ Resources:
           # Create clients for S3, SES, CW and Bedrock
           s3 = boto3.client('s3')
           ses = boto3.client('ses')
-          cloudwatch_logs = boto3.client('logs')
 
           # Configure a timeout for bedrock
           bedrock_config = Config(
@@ -308,7 +307,6 @@ Resources:
               recipient_email = os.environ.get('RECIPIENT_EMAIL')
               region_id = os.environ.get('REGION_ID')
               s3_account_id = os.environ.get('S3_ACCOUNT_ID')
-              function_name = os.environ.get('LAMBDA_FUNCTION_NAME')
 
               recommendations_data = []
 
@@ -318,11 +316,14 @@ Resources:
                       'statusCode': 500,
                       'body': json.dumps('S3_BUCKET_NAME environment variable is not set.')
                   }
-              
+
               try:
                   # Get all object keys from S3
                   object_keys = get_object_keys_from_s3(bucket_name)
-                  
+
+                  # Start and End time of patching data
+                  min_time, max_time = get_txt_object_min_max_times(bucket_name)
+
                   # Group keys by account ID, region, and command ID
                   grouped_keys = group_keys_by_command_id(object_keys)
 
@@ -332,7 +333,7 @@ Resources:
                           for command_id, keys in command_ids.items():
                               # Combine contents of all files for this command ID
                               combined_contents = get_combined_contents(bucket_name, keys)
-                              
+
                               # Generate recommendations using Bedrock
                               recommendations = invoke_bedrock_model(combined_contents)
 
@@ -349,23 +350,20 @@ Resources:
                                       'command_id': command_id,
                                       's3_key': s3_key
                                   })
-                      
+
                                   # Archive processed files
                                   archive_processed_files(bucket_name, keys)
 
                   if recommendations_data:
 
-                      # Get lambda last execution time
-                      current_exec_time, sec_last_exec_time = get_last_execution_times(function_name)
-
                       # Send SES Email
-                      send_ses_email(bucket_name, recommendations_data, sender_email, recipient_email, region_id, s3_account_id, current_exec_time, sec_last_exec_time)
+                      send_ses_email(bucket_name, recommendations_data, sender_email, recipient_email, region_id, s3_account_id, min_time, max_time)
 
                   return {
                       'statusCode': 200,
                       'body': json.dumps('Patch log processing completed successfully.')
                   }
-              
+
               except Exception as e:
                   logger.error(f"Error processing patch logs: {str(e)}", exc_info=True)
                   return {
@@ -384,6 +382,27 @@ Resources:
                   object_keys.extend(obj['Key'] for obj in page.get('Contents', []))
 
               return object_keys
+
+          # Get Patching operation data start and end time
+          def get_txt_object_min_max_times(bucket_name, prefix='patchLogExtractor'):
+
+              min_time = None
+              max_time = None
+
+              object_keys = get_object_keys_from_s3(bucket_name, prefix)
+
+              for key in object_keys:
+                  if key.endswith('.txt'):
+                      response = s3.head_object(Bucket=bucket_name, Key=key)
+                      last_modified = response['LastModified']
+
+                      if min_time is None or last_modified < min_time:
+                          min_time = last_modified
+
+                      if max_time is None or last_modified > max_time:
+                          max_time = last_modified
+
+              return min_time, max_time
 
           # Groups object keys by their account ID, region, and command ID
           def group_keys_by_command_id(object_keys):
@@ -423,7 +442,7 @@ Resources:
           {combined_contents}
 
           Please analyze the above logs and provide:
-          1. Detailed troubleshooting recommendations for patching errors in the above file. 
+          1. Detailed troubleshooting recommendations for patching errors in the above file.
           2. If there are any repeated error messages, group the error messages and show them as a single recommendation.
           3. Detailed steps to resolve each issue, including the following where ever applicable:
           - Relevant AWS Console actions or CLI commands
@@ -509,41 +528,8 @@ Resources:
                   logger.error(f"Error saving recommendations: {str(e)}")
                   raise
 
-          def get_last_execution_times(function_name):
-              try:
-                  log_group_name = f"/aws/lambda/{function_name}"
-                  response = cloudwatch_logs.describe_log_streams(
-                      logGroupName=log_group_name,
-                      orderBy='LastEventTime',
-                      descending=True,
-                      limit=2
-                  )
-                  
-                  execution_times = []
-                  
-                  for stream in response.get('logStreams', [])[:2]:
-                      last_event_timestamp = stream['lastEventTimestamp']
-                      execution_time = datetime.fromtimestamp(last_event_timestamp / 1000, tz=timezone.utc)
-                      execution_times.append(execution_time.strftime("%Y-%m-%d %H:%M:%S"))
-                  
-                  if len(execution_times) == 2:
-                      return execution_times[0], execution_times[1]  # Current, Second-to-last
-                  elif len(execution_times) == 1:
-                      return execution_times[0], None  # Only current execution time available
-                  else:
-                      return None, None  # No execution times available
-              
-              except Exception as e:
-                  logger.error(f"Error getting last execution times: {str(e)}")
-                  return None, None
-
           # Send SES email
-          def send_ses_email(bucket_name, recommendations_data, sender_email, recipient_email, region_id, s3_account_id, current_exec_time, sec_last_exec_time):
-              if sec_last_exec_time:
-                  time_range = f"Below recommendations are for the patch operations data between <b>{sec_last_exec_time} UTC</b> and <b>{current_exec_time} UTC</b>"
-              else:
-                  time_range = f"Below recommendations are for the patch operations data till <b>{current_exec_time} UTC</b>"
-                  
+          def send_ses_email(bucket_name, recommendations_data, sender_email, recipient_email, region_id, s3_account_id, min_time, max_time):
               try:
                   # Create email content
                   subject = "Patch recommendations report for troubleshooting"
@@ -552,7 +538,7 @@ Resources:
                   <head></head>
                   <body>
                       <h2>Consolidated patch recommendations for failed nodes</h2>
-                      <p>{time_range}</p>
+                      <p>Below recommendations are for the patch operations data between <b>{min_time} UTC</b> and <b>{max_time} UTC</b></p>
                       <p>The recommendations file(s) are hosted centrally in:</p>
                       <p>S3 Bucket: <b>{bucket_name}</b></p>
                       <p>Account ID: <b>{s3_account_id}</b></p>
@@ -575,7 +561,7 @@ Resources:
                       command_id = data['command_id'].split('=')[1] if '=' in data['command_id'] else data['command_id']
 
                       s3_url = f"https://s3.console.aws.amazon.com/s3/object/{bucket_name}/{data['s3_key']}?region={region_id}"
-                      
+
                       body_html += f"""
                           <tr>
                               <td>{account_id}</td>
@@ -625,7 +611,7 @@ Resources:
                   try:
                       # Copy the object to the archive location
                       s3.copy_object(Bucket=bucket_name, CopySource={'Bucket': bucket_name, 'Key': key}, Key=archive_key)
-                      
+
                       # Delete the original object
                       s3.delete_object(Bucket=bucket_name, Key=key)
 
