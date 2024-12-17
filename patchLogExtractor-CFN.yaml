@@ -638,6 +638,8 @@ Resources:
   LambdaFunctionLogGroup:
     Condition: CentralAccount
     Type: AWS::Logs::LogGroup
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Retain
     Properties:
       RetentionInDays: 30
       Tags:
@@ -676,7 +678,6 @@ Resources:
   BucketPolicy:
     Condition: CentralAccount
     Type: AWS::S3::BucketPolicy
-    Condition: CentralAccount
     Properties:
       Bucket: !Ref PatchReportingS3Bucket
       PolicyDocument:
