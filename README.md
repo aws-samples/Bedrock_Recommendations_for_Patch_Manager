@@ -10,7 +10,7 @@ CloudFormation Templates:
 
 * [patchLogExtractor-CFN.yaml](/patchLogExtractor-CFN.yaml)
 
-![Architecture diagram for Patch Log recommendations by Bedrock](/bedrock-patch-troubleshooting-recommendations-central-bottom.png)
+![Architecture diagram for Patch Log recommendations by Bedrock](/bedrock-patch-troubleshooting-recommendations-central.png)
 
 ## Security
 
