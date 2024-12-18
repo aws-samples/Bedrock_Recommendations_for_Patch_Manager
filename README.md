@@ -2,7 +2,7 @@
 
 This repo hosts CloudFormation templates related to the AWS Cloud Operations blog post:
 
-LINK TBD
+https://aws.amazon.com/blogs/mt/troubleshooting-aws-systems-manager-patching-made-easy-with-amazon-bedrocks-automated-recommendations/
 
 For details on how to use the corresponding CloudFormation templates, refer to the blog post.
 
