@@ -9,7 +9,7 @@ For details on how to use the corresponding CloudFormation templates, refer to t
 CloudFormation Templates:
 
 * [patchLogExtractor-CFN.yaml](/patchLogExtractor-CFN.yaml)
-* [patchLogExtractor-CFN-SingleAccount.yaml](/patchLogExtractor-CFN-SingleAccount)
+* [patchLogExtractor-CFN-SingleAccount.yaml](/patchLogExtractor-CFN-SingleAccount.yaml)
 
 ![Architecture diagram for Patch Log recommendations by Bedrock](/bedrock-patch-troubleshooting-recommendations-central.png)
 
